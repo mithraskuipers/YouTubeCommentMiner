@@ -1,3 +1,3 @@
 - Also retrieve replies on comments.
-- Do not store data other than the .json comments in the specified subdir.
-- Standardize usage message across the tools + usage examples (more than 1)
+- comment_search.py Can you add the functionality to also extract the comments of a specific user? And also to search in those as well? Can you also add the feature to detect the most active user found in the comments? So you could run it multiple times first to detect the most active user, then extract all his/her comments?
+- url finder. Fix the code here so that it properly can obtain many urls. Currently it seems to stop scanning...maxing out at 35-38 something. Very weird. What could be the reason? Fix it.
