@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-YouTube URL Collector
-Searches YouTube and collects video URLs.
-Auto-generated filenames include all settings for easy tracking.
+YouTube URL Collector - Enhanced Edition
+Searches YouTube and collects video URLs using multiple methods.
+Can retrieve 100+ URLs reliably using YouTube's internal API.
 """
 import sys
 import argparse
@@ -11,185 +11,483 @@ import json
 import time
 from pathlib import Path
 from datetime import datetime
-from urllib.parse import quote_plus
+from urllib.parse import quote, urlencode
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 
 APP_NAME = "YouTube URL Collector"
 DEFAULT_OUTPUT_DIR = "url_lists"
 
+# Try to import Selenium (optional)
+try:
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
 
-# ───────────────────────────────
-# URL + SORT HELPERS
-# ───────────────────────────────
+
+# ═══════════════════════════════════════════════════════════
+# METHOD 1: YOUTUBE INTERNAL API (NO SELENIUM, 100+ URLs)
+# ═══════════════════════════════════════════════════════════
+
+def extract_api_key(html):
+    """Extract YouTube's internal API key from page HTML"""
+    patterns = [
+        r'"INNERTUBE_API_KEY":"([^"]+)"',
+        r'"innertubeApiKey":"([^"]+)"',
+        r'ytcfg\.set\(.*?"INNERTUBE_API_KEY":\s*"([^"]+)"',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html)
+        if match:
+            return match.group(1)
+    return None
+
+
+def extract_client_data(html):
+    """Extract client version and other data from HTML"""
+    data = {}
+    
+    # Client version
+    match = re.search(r'"clientVersion":"([^"]+)"', html)
+    if match:
+        data['clientVersion'] = match.group(1)
+    
+    # Visitor data
+    match = re.search(r'"visitorData":"([^"]+)"', html)
+    if match:
+        data['visitorData'] = match.group(1)
+    
+    return data
+
 
 def get_sort_param(sort_by):
-    """Get the YouTube sort parameter based on user choice"""
+    """Get YouTube sort parameter"""
     sort_params = {
-        'date': 'CAI%3D',      # Upload date (newest first)
-        'views': 'CAMSAhAB',   # View count (most viewed)
-        'rating': 'CAESAhAB',  # Rating (highest rated)
-        'relevance': ''        # Default/relevance (no parameter)
+        'date': 'CAISAhAB',        # Upload date
+        'views': 'CAMSAhAB',       # View count
+        'rating': 'CAESAhAB',      # Rating
+        'relevance': None          # Default
     }
-    return sort_params.get(sort_by, '')
+    return sort_params.get(sort_by)
 
 
-def build_search_url(query, sort_by='relevance'):
-    """Build YouTube search URL with optional sorting parameters"""
-    encoded_query = quote_plus(query)
-    base_url = f"https://www.youtube.com/results?search_query={encoded_query}"
-
+def search_youtube_api(query, max_results, sort_by='relevance'):
+    """
+    Search YouTube using internal API - NO SELENIUM REQUIRED
+    Can reliably retrieve 100+ results through continuation tokens.
+    """
+    print(f"\n🔍 Searching YouTube API...")
+    print(f"   Query: {query}")
+    print(f"   Target: {max_results} URLs")
+    print(f"   Sort: {sort_by}\n")
+    
+    all_urls = []
+    seen_ids = set()
+    
+    # Step 1: Get initial page to extract API key and context
+    encoded_query = quote(query)
     sort_param = get_sort_param(sort_by)
+    
+    initial_url = f"https://www.youtube.com/results?search_query={encoded_query}"
     if sort_param:
-        base_url += f"&sp={sort_param}"
-
-    return base_url
-
-
-# ───────────────────────────────
-# YOUTUBE PARSING CORE
-# ───────────────────────────────
-
-VIDEO_ID_RE = re.compile(r'"videoId":"([a-zA-Z0-9_-]{11})"')
-
-
-def extract_video_ids_from_text(text):
-    """Extract video IDs from any JSON/text block"""
-    seen = set()
-    ids = []
-    for vid in VIDEO_ID_RE.findall(text):
-        if vid not in seen:
-            seen.add(vid)
-            ids.append(vid)
-    return ids
-
-
-def extract_initial_data(html):
-    """Extract ytInitialData JSON from HTML"""
-    m = re.search(r'var ytInitialData = ({.*?});</script>', html, re.DOTALL)
-    if not m:
-        return None
-    return json.loads(m.group(1))
-
-
-def extract_continuation_from_initial(data):
-    """Extract continuation token from ytInitialData"""
+        initial_url += f"&sp={sort_param}"
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+    }
+    
     try:
-        sections = (
-            data["contents"]["twoColumnSearchResultsRenderer"]
-            ["primaryContents"]["sectionListRenderer"]["contents"]
-        )
-        for item in sections:
-            if "continuationItemRenderer" in item:
-                return (
-                    item["continuationItemRenderer"]
-                    ["continuationEndpoint"]["continuationCommand"]["token"]
-                )
-    except Exception:
+        print("📥 Fetching initial page...")
+        req = Request(initial_url, headers=headers)
+        with urlopen(req, timeout=15) as response:
+            html = response.read().decode('utf-8')
+        
+        # Extract API key and client data
+        api_key = extract_api_key(html)
+        if not api_key:
+            print("❌ Could not extract API key from page")
+            return []
+        
+        print(f"✅ Found API key: {api_key[:20]}...")
+        
+        client_data = extract_client_data(html)
+        
+        # Extract initial data
+        match = re.search(r'var ytInitialData = ({.*?});</script>', html, re.DOTALL)
+        if not match:
+            print("❌ Could not extract initial data")
+            return []
+        
+        initial_data = json.loads(match.group(1))
+        
+        # Extract videos from initial page
+        videos = extract_videos_from_data(initial_data)
+        for vid in videos:
+            if vid not in seen_ids:
+                seen_ids.add(vid)
+                all_urls.append(f"https://www.youtube.com/watch?v={vid}")
+        
+        print(f"   Initial batch: {len(all_urls)} videos")
+        
+        # Extract continuation token
+        continuation = extract_continuation_token(initial_data)
+        
+        # Step 2: Use continuation tokens to get more results
+        api_url = "https://www.youtube.com/youtubei/v1/search"
+        
+        context = {
+            "client": {
+                "clientName": "WEB",
+                "clientVersion": client_data.get('clientVersion', '2.20231201.00.00'),
+            }
+        }
+        
+        if 'visitorData' in client_data:
+            context['client']['visitorData'] = client_data['visitorData']
+        
+        iteration = 1
+        max_iterations = 50  # Safety limit
+        
+        while continuation and len(all_urls) < max_results and iteration < max_iterations:
+            print(f"   Fetching batch {iteration + 1}... ({len(all_urls)}/{max_results})", end='\r')
+            
+            payload = {
+                "context": context,
+                "continuation": continuation
+            }
+            
+            api_headers = headers.copy()
+            api_headers['Content-Type'] = 'application/json'
+            
+            req = Request(
+                f"{api_url}?key={api_key}",
+                data=json.dumps(payload).encode('utf-8'),
+                headers=api_headers
+            )
+            
+            try:
+                with urlopen(req, timeout=15) as response:
+                    data = json.loads(response.read().decode('utf-8'))
+                
+                # Extract videos
+                videos = extract_videos_from_continuation(data)
+                new_count = 0
+                for vid in videos:
+                    if vid not in seen_ids:
+                        seen_ids.add(vid)
+                        all_urls.append(f"https://www.youtube.com/watch?v={vid}")
+                        new_count += 1
+                        if len(all_urls) >= max_results:
+                            break
+                
+                if new_count == 0:
+                    print("\n⚠️  No new videos found, stopping...")
+                    break
+                
+                # Get next continuation token
+                continuation = extract_continuation_from_ajax(data)
+                if not continuation:
+                    print("\n✅ Reached end of results")
+                    break
+                
+                iteration += 1
+                time.sleep(0.5)  # Be polite to YouTube's servers
+                
+            except Exception as e:
+                print(f"\n⚠️  Error fetching batch {iteration}: {e}")
+                break
+        
+        print(f"\n✅ Collected {len(all_urls)} total URLs")
+        return all_urls[:max_results]
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return []
+
+
+def extract_videos_from_data(data):
+    """Extract video IDs from ytInitialData"""
+    video_ids = []
+    
+    try:
+        contents = data['contents']['twoColumnSearchResultsRenderer']['primaryContents']['sectionListRenderer']['contents']
+        
+        for section in contents:
+            if 'itemSectionRenderer' in section:
+                items = section['itemSectionRenderer']['contents']
+                for item in items:
+                    if 'videoRenderer' in item:
+                        video_id = item['videoRenderer']['videoId']
+                        video_ids.append(video_id)
+    except (KeyError, TypeError):
         pass
+    
+    return video_ids
+
+
+def extract_continuation_token(data):
+    """Extract continuation token from initial data"""
+    try:
+        contents = data['contents']['twoColumnSearchResultsRenderer']['primaryContents']['sectionListRenderer']['contents']
+        
+        for section in contents:
+            if 'continuationItemRenderer' in section:
+                token = section['continuationItemRenderer']['continuationEndpoint']['continuationCommand']['token']
+                return token
+    except (KeyError, TypeError):
+        pass
+    
     return None
+
+
+def extract_videos_from_continuation(data):
+    """Extract video IDs from continuation response"""
+    video_ids = []
+    
+    try:
+        actions = data['onResponseReceivedCommands']
+        for action in actions:
+            if 'appendContinuationItemsAction' in action:
+                items = action['appendContinuationItemsAction']['continuationItems']
+                for item in items:
+                    if 'itemSectionRenderer' in item:
+                        for content in item['itemSectionRenderer']['contents']:
+                            if 'videoRenderer' in content:
+                                video_id = content['videoRenderer']['videoId']
+                                video_ids.append(video_id)
+    except (KeyError, TypeError):
+        pass
+    
+    return video_ids
 
 
 def extract_continuation_from_ajax(data):
-    """Extract continuation token from AJAX response"""
+    """Extract next continuation token from API response"""
     try:
-        items = (
-            data["onResponseReceivedCommands"][0]
-            ["appendContinuationItemsAction"]["continuationItems"]
-        )
-        last = items[-1]
-        if "continuationItemRenderer" in last:
-            return (
-                last["continuationItemRenderer"]
-                ["continuationEndpoint"]["continuationCommand"]["token"]
-            )
-    except Exception:
+        actions = data['onResponseReceivedCommands']
+        for action in actions:
+            if 'appendContinuationItemsAction' in action:
+                items = action['appendContinuationItemsAction']['continuationItems']
+                for item in items:
+                    if 'continuationItemRenderer' in item:
+                        token = item['continuationItemRenderer']['continuationEndpoint']['continuationCommand']['token']
+                        return token
+    except (KeyError, TypeError):
         pass
+    
     return None
 
 
-# ───────────────────────────────
-# SEARCH FUNCTION (FIXED)
-# ───────────────────────────────
+# ═══════════════════════════════════════════════════════════
+# METHOD 2: SELENIUM (WITH LOGIN SUPPORT)
+# ═══════════════════════════════════════════════════════════
 
-def search_youtube(query, max_results, sort_by):
-    """Search YouTube and return list of video URLs, handling scrolling"""
-    print(f"\n{'='*60}")
-    print(f"Searching YouTube for: '{query}'")
-    print(f"Max results requested: {max_results}")
-    print(f"Sort by: {sort_by}")
-    print(f"{'='*60}\n")
+def perform_login(driver, wait_time=120):
+    """Navigate to YouTube and wait for user to manually log in"""
+    try:
+        print("\n" + "="*60)
+        print("🔐 YouTube Login".center(60))
+        print("="*60)
+        print("\n📌 Opening YouTube login page...")
+        print("⏳ Please log in manually in the browser window")
+        print(f"⏱️  You have {wait_time} seconds to complete login")
+        print("\n💡 INSTRUCTIONS:")
+        print("   1. The browser window will open shortly")
+        print("   2. Click 'Sign in' button (top right)")
+        print("   3. Enter your Google credentials")
+        print("   4. Complete any 2FA if required")
+        print("   5. Wait for YouTube homepage to load")
+        print("   6. Script will continue automatically")
+        print("\n" + "="*60 + "\n")
+        
+        driver.get("https://www.youtube.com")
+        time.sleep(3)
+        
+        start_time = time.time()
+        logged_in = False
+        
+        print("⏳ Waiting for login... (checking every 5 seconds)")
+        
+        while time.time() - start_time < wait_time:
+            try:
+                avatar = driver.find_elements(By.CSS_SELECTOR, "button#avatar-btn, button.ytd-topbar-menu-button-renderer")
+                
+                if avatar:
+                    logged_in = True
+                    print("\n✅ Login detected! Continuing with authenticated session...\n")
+                    time.sleep(2)
+                    break
+                
+                elapsed = int(time.time() - start_time)
+                remaining = wait_time - elapsed
+                print(f"   Still waiting... ({remaining}s remaining)", end='\r')
+                time.sleep(5)
+                
+            except Exception:
+                pass
+        
+        if not logged_in:
+            print("\n\n⚠️  Login timeout or not detected")
+            response = input("\n❓ Continue without login? (y/n): ").strip().lower()
+            if response != 'y':
+                print("❌ Aborted by user")
+                return False
+            print("⏭️  Continuing without authentication...\n")
+        
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ Login error: {e}")
+        return False
 
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Content-Type": "application/json"
-    }
+
+def search_youtube_selenium(query, max_results, sort_by="relevance", headless=False, login=False):
+    """Search YouTube using Selenium with aggressive scrolling for 100+ URLs"""
+    
+    if not SELENIUM_AVAILABLE:
+        print("❌ Selenium not installed. Use: pip install selenium")
+        return []
+    
+    chrome_options = Options()
+    
+    if login and headless:
+        print("⚠️  Warning: Login requires visible browser. Disabling headless mode.")
+        headless = False
+    
+    if headless:
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--window-size=1920,1080")
+    
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+    chrome_options.add_argument("--lang=en-US")
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
+    if login:
+        profile_dir = Path("./yt_chrome_profile").resolve()
+        profile_dir.mkdir(exist_ok=True)
+        chrome_options.add_argument(f"--user-data-dir={profile_dir}")
+        chrome_options.add_argument("--profile-directory=Default")
+    
+    try:
+        driver = webdriver.Chrome(options=chrome_options)
+    except Exception as e:
+        print(f"\n❌ Failed to start Chrome: {e}")
+        print("\n💡 Troubleshooting:")
+        print("   • Make sure Chrome browser is installed")
+        print("   • Try: pip install selenium webdriver-manager")
+        print("   • Or use --api method (no Selenium needed)")
+        return []
 
     urls = []
     seen_ids = set()
 
-    # ── First page ───────────────────────────
     try:
-        req = Request(build_search_url(query, sort_by), headers=headers)
-        html = urlopen(req, timeout=30).read().decode("utf-8")
-    except URLError as e:
-        print(f"✗ Network error: {e}")
-        return []
-
-    # Extract initial video IDs from HTML
-    for vid in extract_video_ids_from_text(html):
-        if vid not in seen_ids:
-            seen_ids.add(vid)
-            urls.append(f"https://www.youtube.com/watch?v={vid}")
-            if len(urls) >= max_results:
+        if login:
+            if not perform_login(driver):
                 return urls
+        
+        # Build search URL
+        encoded_query = quote(query)
+        search_url = f"https://www.youtube.com/results?search_query={encoded_query}"
+        
+        sort_param = get_sort_param(sort_by)
+        if sort_param:
+            search_url += f"&sp={sort_param}"
+        
+        print(f"🔍 Searching: {query}")
+        print(f"📊 Sort by: {sort_by}")
+        print(f"🎯 Target: {max_results} videos\n")
+        
+        driver.get(search_url)
+        
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "ytd-video-renderer"))
+        )
+        
+        print("📥 Collecting video URLs with aggressive scrolling...")
+        
+        scroll_count = 0
+        max_scrolls = 200  # Increased limit
+        stall_count = 0
+        max_stalls = 3
+        
+        last_count = 0
+        
+        while len(urls) < max_results and scroll_count < max_scrolls:
+            # Extract all video links
+            video_elements = driver.find_elements(By.CSS_SELECTOR, "a#video-title, a.yt-simple-endpoint[href*='/watch?v=']")
+            
+            for elem in video_elements:
+                try:
+                    href = elem.get_attribute("href")
+                    if not href or "/shorts/" in href or "list=" in href:
+                        continue
+                    
+                    match = re.search(r'watch\?v=([a-zA-Z0-9_-]{11})', href)
+                    if match:
+                        vid = match.group(1)
+                        if vid not in seen_ids:
+                            seen_ids.add(vid)
+                            urls.append(f"https://www.youtube.com/watch?v={vid}")
+                            print(f"   Found: {len(urls)}/{max_results} videos", end='\r')
+                            
+                            if len(urls) >= max_results:
+                                break
+                except:
+                    continue
+            
+            if len(urls) >= max_results:
+                break
+            
+            # Check if we're making progress
+            if len(urls) == last_count:
+                stall_count += 1
+                if stall_count >= max_stalls:
+                    print(f"\n⚠️  No new videos after {max_stalls} scroll attempts")
+                    break
+            else:
+                stall_count = 0
+                last_count = len(urls)
+            
+            # Aggressive scrolling strategy
+            for _ in range(3):
+                driver.execute_script("window.scrollBy(0, 800);")
+                time.sleep(0.3)
+            
+            driver.execute_script("window.scrollTo(0, document.documentElement.scrollHeight);")
+            time.sleep(1.2)
+            
+            scroll_count += 1
+        
+        print(f"\n✅ Collected {len(urls)} video URLs")
+        return urls[:max_results]
+        
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        return urls
+    finally:
+        if not login:
+            driver.quit()
+        else:
+            print("\n💡 Browser will close in 5 seconds...")
+            time.sleep(5)
+            driver.quit()
 
-    # Extract continuation token for scrolling
-    initial_data = extract_initial_data(html)
-    continuation = extract_continuation_from_initial(initial_data)
 
-    # ── Continuation loop ────────────────────
-    while continuation and len(urls) < max_results:
-        payload = {
-            "context": {
-                "client": {
-                    "clientName": "WEB",
-                    "clientVersion": "2.20240101.00.00"
-                }
-            },
-            "continuation": continuation
-        }
-
-        try:
-            req = Request(
-                "https://www.youtube.com/youtubei/v1/search",
-                data=json.dumps(payload).encode("utf-8"),
-                headers=headers
-            )
-            resp = json.loads(urlopen(req, timeout=30).read().decode("utf-8"))
-        except Exception:
-            break
-
-        # Extract video IDs from AJAX JSON
-        text = json.dumps(resp)
-        for vid in extract_video_ids_from_text(text):
-            if vid not in seen_ids:
-                seen_ids.add(vid)
-                urls.append(f"https://www.youtube.com/watch?v={vid}")
-                if len(urls) >= max_results:
-                    return urls
-
-        continuation = extract_continuation_from_ajax(resp)
-        time.sleep(0.5)  # polite pause
-
-    print(f"✓ Found {len(urls)} video(s)")
-    return urls
-
-
-# ───────────────────────────────
+# ═══════════════════════════════════════════════════════════
 # OUTPUT HELPERS
-# ───────────────────────────────
+# ═══════════════════════════════════════════════════════════
 
 def save_urls(urls, output_file):
     """Save URLs to a text file"""
@@ -198,16 +496,16 @@ def save_urls(urls, output_file):
         with open(output_file, 'w', encoding='utf-8') as f:
             for url in urls:
                 f.write(f"{url}\n")
-        print(f"\n✓ URLs saved to: {output_file}")
+        print(f"\n✅ URLs saved to: {output_file}")
         return True
     except Exception as e:
-        print(f"\n✗ Error saving URLs: {e}")
+        print(f"\n❌ Error saving URLs: {e}")
         return False
 
 
 def preview_urls(urls, preview_count=5):
     """Display a preview of the URLs"""
-    print(f"\nPreview (first {min(preview_count, len(urls))} URLs):")
+    print(f"\n📋 Preview (first {min(preview_count, len(urls))} URLs):")
     print("-" * 60)
     for i, url in enumerate(urls[:preview_count], 1):
         print(f"{i}. {url}")
@@ -217,252 +515,142 @@ def preview_urls(urls, preview_count=5):
 
 
 def generate_output_filename(query, sort_by, max_results, output_dir=DEFAULT_OUTPUT_DIR):
-    """Generate a descriptive filename including all key settings"""
+    """Generate a descriptive filename"""
     safe_query = "".join(c if c.isalnum() or c in " _-" else "_" for c in query)
     safe_query = re.sub(r'_+', '_', safe_query)
     safe_query = safe_query.strip('_').lower()
     safe_query = safe_query[:60]
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_part = f"n{max_results}"
-
-    filename = f"yt_urls_{safe_query}_{sort_by}_{results_part}_{timestamp}.txt"
+    filename = f"yt_urls_{safe_query}_{sort_by}_n{max_results}_{timestamp}.txt"
     return str(Path(output_dir) / filename)
 
-def print_detailed_help():
-    """Print detailed usage examples and help"""
+
+def print_help():
+    """Print usage help"""
     print("\n" + "="*70)
     print(APP_NAME.center(70))
     print("="*70)
-    print("\n📖 USAGE GUIDE\n")
+    print("\n🚀 ENHANCED VERSION - Can retrieve 100+ URLs!\n")
+    
+    print("METHODS:")
+    print("  --api      : YouTube Internal API (DEFAULT, NO SELENIUM)")
+    print("               ✅ Fast, reliable, 100+ URLs easily")
+    print("               ✅ No browser needed")
+    print("  --selenium : Browser automation with Selenium")
+    print("               ⚠️  Requires Chrome + Selenium")
+    print("               ✅ Can use --login for authentication\n")
+    
+    print("BASIC USAGE:")
+    print('  python url_collector.py "QUERY" -n 100\n')
+    
+    print("EXAMPLES:")
+    print('  Get 100 URLs using API (fast, recommended):')
+    print('    python url_collector.py "python tutorials" -n 100\n')
+    
+    print('  Get 150 URLs sorted by date:')
+    print('    python url_collector.py "tech news" -n 150 -s date\n')
+    
+    print('  Use Selenium with login:')
+    print('    python url_collector.py "gaming" -n 100 --selenium --login\n')
+    
+    print('  Get 500 URLs (API method):')
+    print('    python url_collector.py "music" -n 500 -s views\n')
+    
+    print("OPTIONS:")
+    print("  -n, --max NUM       Number of URLs to collect (default: 10)")
+    print("  -s, --sort TYPE     Sort: relevance, date, views, rating")
+    print("  -o, --output FILE   Output filename")
+    print("  --api               Use YouTube API (default, fast)")
+    print("  --selenium          Use Selenium browser automation")
+    print("  --login             Login before searching (Selenium only)")
+    print("  --no-preview        Skip URL preview")
+    print("\n" + "="*70 + "\n")
 
-    print("BASIC SYNTAX:")
-    print(' python url_collector.py "SEARCH QUERY" [OPTIONS]\n')
-
-    print("="*70)
-    print("\n🔍 SEARCH QUERY EXAMPLES:\n")
-    print("Simple search:")
-    print(' python url_collector.py "python tutorials"')
-    print(' python url_collector.py "cooking recipes"\n')
-
-    print("Combined search terms (multiple words):")
-    print(' python url_collector.py "machine learning basics"')
-    print(' python url_collector.py "how to fix car engine"')
-    print(' python url_collector.py "best gaming laptops 2024"\n')
-
-    print("Search with operators (use quotes!):")
-    print(' python url_collector.py "python AND pandas"')
-    print(' python url_collector.py "travel vlog thailand"')
-    print(' python url_collector.py "guitar tutorial beginner"\n')
-
-    print("="*70)
-    print("\n📊 SORTING OPTIONS:\n")
-    print("Sort by RELEVANCE (default):")
-    print(' python url_collector.py "javascript" -s relevance')
-    print(' python url_collector.py "javascript" # same as above\n')
-
-    print("Sort by DATE (newest first):")
-    print(' python url_collector.py "tech news" -s date')
-    print(' python url_collector.py "gaming highlights" --sort date\n')
-
-    print("Sort by VIEWS (most viewed first):")
-    print(' python url_collector.py "music videos" -s views')
-    print(' python url_collector.py "viral videos" --sort views\n')
-
-    print("Sort by RATING (highest rated first):")
-    print(' python url_collector.py "documentary" -s rating')
-    print(' python url_collector.py "educational content" --sort rating\n')
-
-    print("="*70)
-    print("\n🔢 LIMITING RESULTS:\n")
-    print("Get first 10 videos (default):")
-    print(' python url_collector.py "cooking"\n')
-
-    print("Get first 50 videos:")
-    print(' python url_collector.py "python tutorials" -n 50')
-    print(' python url_collector.py "python tutorials" --max 50\n')
-
-    print("Get first 100 videos:")
-    print(' python url_collector.py "fitness workouts" -n 100\n')
-
-    print("Get first 5 videos only:")
-    print(' python url_collector.py "quick recipes" -n 5\n')
-
-    print("⚠️ NOTE: YouTube returns ~20-30 results per page.")
-    print(" Requesting 100+ results may only return 20-30 actual URLs.\n")
-
-    print("="*70)
-    print("\n💾 OUTPUT FILE OPTIONS:\n")
-    print("Auto-generated filename (default - saved in ./url_lists/):")
-    print(' python url_collector.py "travel vlogs" -n 50')
-    print(" → Creates: ./url_lists/yt_urls_travel_vlogs_relevance_n50_20260102_143022.txt\n")
-
-    print("Custom filename (still in ./url_lists/):")
-    print(' python url_collector.py "music" -n 30 -o my_music.txt')
-    print(" → Creates: ./url_lists/my_music.txt\n")
-
-    print("Custom filename with custom directory:")
-    print(' python url_collector.py "coding" -o my_dir/code_videos.txt')
-    print(" → Creates: ./my_dir/code_videos.txt\n")
-
-    print("="*70)
-    print("\n🎯 COMPLETE EXAMPLES:\n")
-    print("Example 1: Get 50 newest Python tutorials")
-    print(' python url_collector.py "python programming tutorial" -n 50 -s date\n')
-    print("Example 2: Get 100 most viewed music videos")
-    print(' python url_collector.py "music video" -n 100 -s views -o top_music.txt\n')
-    print("Example 3: Get 25 highest rated documentaries")
-    print(' python url_collector.py "documentary" -n 25 -s rating\n')
-    print("Example 4: Get 10 most relevant cooking videos (no preview)")
-    print(' python url_collector.py "cooking recipes" -n 10 --no-preview\n')
-    print("Example 5: Complex search with combined terms")
-    print(' python url_collector.py "artificial intelligence machine learning" -n 50 -s date\n')
-    print("Example 6: Get recent gaming content")
-    print(' python url_collector.py "gaming highlights 2024" -n 30 -s date -o gaming.txt\n')
-
-    print("="*70)
-    print("\n❌ COMMON MISTAKES TO AVOID:\n")
-    print("❌ Missing quotes around multi-word searches:")
-    print(' python url_collector.py python tutorials # WRONG')
-    print(' python url_collector.py "python tutorials" # CORRECT\n')
-    print("❌ Invalid sort option:")
-    print(' python url_collector.py "music" -s popular # WRONG')
-    print(' python url_collector.py "music" -s views # CORRECT\n')
-    print("❌ Typo in sort option:")
-    print(' python url_collector.py "videos" -s view # WRONG (singular)')
-    print(' python url_collector.py "videos" -s views # CORRECT (plural)\n')
-    print("❌ Unrealistic expectations:")
-    print(' python url_collector.py "test" -n 1000')
-    print(" → Will likely only return ~20-30 URLs due to YouTube limitations\n")
-
-    print("="*70)
-    print("\n💡 TIPS:\n")
-    print("• Use quotes around searches with spaces")
-    print("• Be specific in your search terms for better results")
-    print("• Combine sorting and limits for targeted results")
-    print("• Check the preview before processing large batches")
-    print("• Sort by 'date' for recent content, 'views' for popular content")
-    print("• YouTube limits results per page to ~20-30 videos")
-    print(f"• Files are saved in ./{DEFAULT_OUTPUT_DIR}/ by default")
-    print("• For comprehensive scraping, consider using yt-dlp integration\n")
-
-    print("="*70)
-    print("\nFor command-line help: python url_collector.py -h")
-    print("="*70 + "\n")
-
-
-# ───────────────────────────────
-# CLI + MAIN (unchanged)
-# ───────────────────────────────
 
 def main():
-    if len(sys.argv) == 1 or (len(sys.argv) == 2 and sys.argv[1] in ['help', '--help-detailed', '-hh']):
-        print_detailed_help()
-        sys.exit(1)
+    if len(sys.argv) == 1 or '--help' in sys.argv or 'help' in sys.argv:
+        print_help()
+        sys.exit(0)
 
     parser = argparse.ArgumentParser(
-        description='Search YouTube and collect video URLs (no external dependencies required)',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-QUICK EXAMPLES:
-  Get 50 Python tutorials (sorted by relevance):
-    %(prog)s "python tutorials" -n 50
-
-  Get 100 most viewed music videos:
-    %(prog)s "music video" -n 100 -s views
-
-  Get 25 newest documentaries:
-    %(prog)s "documentary" -n 25 -s date -o docs.txt
-
-  Search with combined terms:
-    %(prog)s "machine learning tutorial" -n 50 -s rating
-
-SORT OPTIONS:
-  relevance - Default YouTube relevance ranking
-  date      - Upload date (newest first)
-  views     - View count (highest first)
-  rating    - Rating (highest rated first)
-
-COMBINING SEARCH TERMS:
-  Simply include multiple words in quotes:
-    "python programming tutorial"
-    "best gaming laptops 2024"
-    "how to cook pasta"
-
-OUTPUT:
-  Files are saved to ./url_lists/ by default
-  Use -o to specify a custom filename or path
-
-NOTE: YouTube typically returns 20-30 results per page.
-For detailed help: python url_collector.py help
-        """
+        description='YouTube URL Collector - Can retrieve 100+ URLs',
+        add_help=False
     )
 
-    parser.add_argument('query', help='Search query string (use quotes for multi-word searches: "python tutorials")')
-    parser.add_argument('-n', '--max', type=int, default=10,
-                        help='Maximum number of results (default: 10). Example: -n 50 for first 50 videos')
+    parser.add_argument('query', help='Search query')
+    parser.add_argument('-n', '--max', type=int, default=10, help='Max results (default: 10)')
     parser.add_argument('-s', '--sort', choices=['relevance', 'date', 'views', 'rating'],
-                        default='relevance', help='Sort order: relevance (default), date (newest), views (most viewed), rating (highest rated)')
-    parser.add_argument('-o', '--output', default=None,
-                        help=f'Output filename. Default: auto-generated in ./{DEFAULT_OUTPUT_DIR}/')
-    parser.add_argument('--no-preview', action='store_true', help='Skip URL preview display')
+                        default='relevance', help='Sort order')
+    parser.add_argument('-o', '--output', default=None, help='Output filename')
+    parser.add_argument('--api', action='store_true', help='Use YouTube API (default)')
+    parser.add_argument('--selenium', action='store_true', help='Use Selenium browser')
+    parser.add_argument('--login', action='store_true', help='Login with Selenium')
+    parser.add_argument('--no-preview', action='store_true', help='Skip preview')
+    parser.add_argument('--help', action='store_true', help='Show help')
 
     args = parser.parse_args()
 
+    if args.help:
+        print_help()
+        sys.exit(0)
+
     if args.max <= 0:
         print("\n❌ Error: Maximum results must be greater than 0")
-        print(f" You specified: -n {args.max}")
-        print(" Try: -n 10 (or any positive number)\n")
         sys.exit(1)
-
-    if args.max > 100:
-        print(f"\n⚠️ Warning: You requested {args.max} results.")
-        print(" YouTube typically returns only 20-30 results per page.")
-        print(" You may receive fewer results than requested.\n")
 
     print("\n" + "="*60)
     print("YouTube URL Collector".center(60))
     print("="*60)
 
-    urls = search_youtube(args.query, args.max, args.sort)
+    # Determine method
+    use_selenium = args.selenium or args.login
+    
+    if use_selenium:
+        print("\n🌐 Method: Selenium Browser Automation")
+        if not SELENIUM_AVAILABLE:
+            print("❌ Selenium not installed!")
+            print("   Install: pip install selenium")
+            print("   Or use API method (remove --selenium flag)")
+            sys.exit(1)
+        
+        urls = search_youtube_selenium(
+            args.query,
+            args.max,
+            args.sort,
+            headless=False,
+            login=args.login
+        )
+    else:
+        print("\n🚀 Method: YouTube Internal API (Fast)")
+        urls = search_youtube_api(args.query, args.max, args.sort)
 
     if not urls:
-        print("\n❌ No URLs found or an error occurred")
-        print("\nTROUBLESHOOTING:")
-        print(" • Check your internet connection")
-        print(" • Verify your search query is valid")
-        print(" • Try a different search term")
-        print(" • YouTube may be blocking automated requests\n")
+        print("\n❌ No URLs found")
         sys.exit(1)
 
     if not args.no_preview:
         preview_urls(urls)
 
+    # Generate output filename
     if args.output:
-        # If user provides custom output, check if it includes a directory
         output_path = Path(args.output)
         if output_path.parent == Path('.'):
-            # No directory specified, add default directory
             output_file = str(Path(DEFAULT_OUTPUT_DIR) / args.output)
         else:
-            # User specified a directory, use as-is
             output_file = args.output
     else:
-        # Auto-generate filename in default directory
         output_file = generate_output_filename(args.query, args.sort, args.max)
 
     if save_urls(urls, output_file):
         print(f"\n{'='*60}")
         print(f"✅ Success! Collected {len(urls)} video URLs")
-        print(f"📁 Output file: {output_file}")
-        print(f"🔍 Search query: '{args.query}'")
-        print(f"📊 Sorted by: {args.sort}")
-        print(f"🔢 Requested: {args.max} results")
+        print(f"📁 File: {output_file}")
+        print(f"🔍 Query: '{args.query}'")
+        print(f"📊 Sort: {args.sort}")
+        print(f"🎯 Requested: {args.max}")
         print(f"{'='*60}\n")
-    else:
-        sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
-
