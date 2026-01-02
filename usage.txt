@@ -2,4 +2,4 @@ python .\url_collector.py "kris kremers" -n 100
 
 python .\comment_collector.py -f '.\url_lists\yt_urls_kris kremers_relevance_n100_20260102_125743.txt'
 
-python .\comment_search.py "snuff" -d 'C:\Repos\YT-OSINT\comment_sections\yt_urls_kris kremers_relevance_n100_20260102_125743' --export docx
+ python .\comment_search.py "photo" -d "comment_sections\yt_urls_kris kremers_relevance_n120_20260102_185825"

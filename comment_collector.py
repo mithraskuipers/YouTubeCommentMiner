@@ -34,7 +34,9 @@ def print_intro_banner():
 
 def get_default_ytdlp_path():
     script_dir = Path(__file__).parent
-    return script_dir / ("yt-dlp.exe" if platform.system() == "Windows" else "yt-dlp")
+    bin_dir = script_dir / "bin"
+    exe_name = "yt-dlp.exe" if platform.system() == "Windows" else "yt-dlp"
+    return bin_dir / exe_name
 
 
 def find_ytdlp_executable(custom_path=None):
@@ -42,15 +44,23 @@ def find_ytdlp_executable(custom_path=None):
         p = Path(custom_path)
         return str(p) if p.exists() else None
 
+    # 1. ./bin/yt-dlp
     default = get_default_ytdlp_path()
     if default.exists():
         return str(default)
 
+    # 2. PATH
     try:
-        subprocess.run(["yt-dlp", "--version"], check=True, capture_output=True)
+        subprocess.run(
+            ["yt-dlp", "--version"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         return "yt-dlp"
     except Exception:
         return None
+
 
 
 # ───────────────────────────────
@@ -78,28 +88,25 @@ def read_urls_from_file(path):
 
 def download_comments(url, output_dir, ytdlp_path):
     video_id = extract_video_id(url)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    base = output_dir / f"{video_id}_{timestamp}"
-    info_json = base.with_suffix(".info.json")
-    comments_json = base.with_suffix(".comments.json")
+    output_template = output_dir / f"{video_id}.%(ext)s"
+    comments_json = output_dir / f"{video_id}.comments.json"
+    info_json = output_dir / f"{video_id}.info.json"
 
     cmd = [
         ytdlp_path,
         "--skip-download",
-        "--write-info-json",
         "--write-comments",
+        "--write-info-json",
         "--no-write-thumbnail",
         "--no-write-description",
         "--no-write-subs",
         "--no-write-auto-subs",
-        "--no-write-playlist-metafiles",
+        "--no-playlist",
         "--extractor-args",
         "youtube:comment_sort=top;max_comments=all",
         "-o",
-        str(base),
-        "--quiet",
-        "--no-warnings",
+        str(output_template),
         url,
     ]
 
@@ -111,27 +118,16 @@ def download_comments(url, output_dir, ytdlp_path):
         print("✗ yt-dlp failed")
         return False
 
-    if not info_json.exists():
-        print("✗ info.json missing — no comments retrieved")
+    if not comments_json.exists():
+        print("✗ comments.json not created")
         return False
 
-    try:
-        with open(info_json, "r", encoding="utf-8") as f:
-            data = json.load(f)
+    # Optional cleanup
+    if info_json.exists():
+        info_json.unlink()
 
-        comments = data.get("comments", [])
-
-        with open(comments_json, "w", encoding="utf-8") as f:
-            json.dump(comments, f, ensure_ascii=False, indent=2)
-
-        info_json.unlink()  # remove metadata, keep only comments
-
-        print(f"✓ Saved comments: {comments_json.name}")
-        return True
-
-    except Exception as e:
-        print(f"✗ Failed to extract comments: {e}")
-        return False
+    print(f"✓ Saved comments: {comments_json.name}")
+    return True
 
 
 # ───────────────────────────────

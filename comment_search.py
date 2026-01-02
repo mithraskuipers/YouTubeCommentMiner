@@ -15,6 +15,9 @@ APP_NAME = "YouTube Comment Search"
 
 # ANSI color codes for terminal highlighting
 RED = '\033[91m'
+GREEN = '\033[92m'
+YELLOW = '\033[93m'
+BLUE = '\033[94m'
 RESET = '\033[0m'
 
 class CommentSearcher:
@@ -23,14 +26,29 @@ class CommentSearcher:
         self.results = []
         
     def load_comments_from_file(self, filepath):
-        """Load comments from a JSON file"""
+        """Load yt-dlp comments from a .info.json file"""
         try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                comments = json.load(f)
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            # yt-dlp stores comments under data["comments"]
+            comments = data.get("comments", [])
+            if not isinstance(comments, list):
+                return [], filepath.name
+
             return comments, filepath.name
+
         except Exception as e:
             print(f"✗ Error loading {filepath}: {e}")
             return [], None
+
+
+    def extract_video_id_from_filename(self, filename: str) -> str:
+        """Extract video ID from <videoid>.info.json"""
+        if filename.endswith(".info.json"):
+            return filename[:-len(".info.json")]
+        return "unknown"
+
     
     def search_simple(self, text, keywords, case_sensitive=False):
         """Simple keyword search (any keyword matches)"""
@@ -178,86 +196,295 @@ class CommentSearcher:
         
         return score
     
-    def search_comments(self, keywords, search_mode='any', case_sensitive=False, 
-                       min_likes=0, max_results=None, sort_by='relevance'):
-        """
-        Search through all comment files
+    def get_all_users(self):
+        print(f"\n{'='*60}")
+        print(f"Analyzing users in: {self.comments_dir}")
+        print(f"{'='*60}\n")
+
+        if not self.comments_dir.exists():
+            print(f"✗ Error: Directory not found: {self.comments_dir}")
+            return {}
+
+        json_files = list(self.comments_dir.glob("*.info.json"))
+
+        if not json_files:
+            print(f"✗ No *.info.json files found in {self.comments_dir}")
+            return {}
+
+        print(f"Scanning {len(json_files)} info JSON file(s)...\n")
+
+        user_stats = defaultdict(lambda: {
+            "count": 0,
+            "total_likes": 0,
+            "comments": [],
+            "author_id": None,
+            "is_verified": False,
+            "is_uploader": False,
+        })
+
+        total_comments = 0
+
+        for json_file in json_files:
+            comments, filename = self.load_comments_from_file(json_file)
+            video_id = self.extract_video_id_from_filename(filename)
+
+            total_comments += len(comments)
+
+            for comment in comments:
+                author = comment.get("author", "Unknown")
+                author_id = comment.get("author_id", "N/A")
+
+                stats = user_stats[author]
+                stats["count"] += 1
+                stats["total_likes"] += comment.get("like_count", 0)
+                stats["author_id"] = author_id
+
+                if comment.get("author_is_verified"):
+                    stats["is_verified"] = True
+                if comment.get("author_is_uploader"):
+                    stats["is_uploader"] = True
+
+                stats["comments"].append({
+                    "text": comment.get("text", ""),
+                    "video_id": video_id,
+                    "source_file": filename,
+                    "like_count": comment.get("like_count", 0),
+                    "timestamp": comment.get("timestamp", 0),
+                    "time_text": comment.get("_time_text", "Unknown"),
+                    "full_comment": comment,
+                })
+
+        print(f"✓ Scanned {total_comments} total comments")
+        print(f"✓ Found {len(user_stats)} unique users\n")
+
+        return dict(user_stats)
+
+
+    
+    def show_most_active_users(self, limit=10):
+        """Display the most active users"""
+        user_stats = self.get_all_users()
         
-        search_mode: 'any', 'all', 'phrase', 'regex'
-        sort_by: 'relevance', 'likes', 'date'
-        """
+        if not user_stats:
+            return []
+        
+        # Sort by comment count
+        sorted_users = sorted(user_stats.items(), 
+                             key=lambda x: x[1]['count'], 
+                             reverse=True)
+        
+        print(f"{'='*60}")
+        print(f"Top {min(limit, len(sorted_users))} Most Active Users")
+        print(f"{'='*60}\n")
+        
+        top_users = []
+        for i, (author, stats) in enumerate(sorted_users[:limit], 1):
+            badges = []
+            if stats['is_verified']:
+                badges.append(f"{BLUE}✓ Verified{RESET}")
+            if stats['is_uploader']:
+                badges.append(f"{GREEN}⬆ Uploader{RESET}")
+            
+            badge_str = f" [{', '.join(badges)}]" if badges else ""
+            
+            print(f"{YELLOW}{i}. {author}{RESET}{badge_str}")
+            print(f"   Author ID: {stats['author_id']}")
+            print(f"   Comments: {stats['count']} | Total likes: {stats['total_likes']}")
+            print(f"   Avg likes per comment: {stats['total_likes'] / stats['count']:.1f}")
+            print()
+            
+            top_users.append((author, stats))
+        
+        return top_users
+    
+    def extract_user_comments(self, username, search_keywords=None, search_mode='any', 
+                             case_sensitive=False, min_likes=0):
+        """Extract all comments from a specific user, optionally filtering by keywords"""
+        user_stats = self.get_all_users()
+        
+        if username not in user_stats:
+            print(f"✗ User '{username}' not found in comments")
+            print(f"\nDid you mean one of these?")
+            
+            # Find similar usernames (case-insensitive partial match)
+            similar = [u for u in user_stats.keys() if username.lower() in u.lower()]
+            for u in similar[:5]:
+                print(f"  - {u}")
+            
+            return []
+        
+        stats = user_stats[username]
+        all_comments = stats['comments']
+        
+        print(f"\n{'='*60}")
+        print(f"User: {GREEN}{username}{RESET}")
+        print(f"Author ID: {stats['author_id']}")
+        
+        badges = []
+        if stats['is_verified']:
+            badges.append("Verified")
+        if stats['is_uploader']:
+            badges.append("Uploader")
+        if badges:
+            print(f"Badges: {', '.join(badges)}")
+        
+        print(f"Total comments: {stats['count']}")
+        print(f"Total likes: {stats['total_likes']}")
+        print(f"{'='*60}\n")
+        
+        # Filter by keywords if provided
+        if search_keywords:
+            print(f"Filtering by keywords: {search_keywords}")
+            print(f"Mode: {search_mode}, Case-sensitive: {case_sensitive}\n")
+            
+            filtered_comments = []
+            for comment_data in all_comments:
+                text = comment_data['text']
+                
+                # Apply like filter
+                if comment_data['like_count'] < min_likes:
+                    continue
+                
+                # Apply search based on mode
+                match = False
+                if search_mode == 'any':
+                    match = self.search_simple(text, search_keywords, case_sensitive)
+                elif search_mode == 'all':
+                    match = self.search_all_keywords(text, search_keywords, case_sensitive)
+                elif search_mode == 'phrase':
+                    match = self.search_phrase(text, ' '.join(search_keywords), case_sensitive)
+                elif search_mode == 'regex':
+                    match = self.search_regex(text, search_keywords[0])
+                
+                if match:
+                    filtered_comments.append(comment_data)
+            
+            all_comments = filtered_comments
+            print(f"✓ Found {len(all_comments)} matching comments from this user\n")
+        else:
+            # Apply like filter even without keywords
+            if min_likes > 0:
+                all_comments = [c for c in all_comments if c['like_count'] >= min_likes]
+                print(f"✓ Filtered to {len(all_comments)} comments with {min_likes}+ likes\n")
+        
+        # Convert to results format
+        results = []
+        for comment_data in all_comments:
+            result = {
+                'comment': comment_data['full_comment'],
+                'source_file': comment_data['source_file'],
+                'video_id': comment_data['video_id'],
+                'relevance_score': 0,  # Not applicable for user extraction
+                'matched_text': []
+            }
+            
+            if search_keywords:
+                result['relevance_score'] = self.calculate_relevance_score(
+                    comment_data['full_comment'], 
+                    search_keywords, 
+                    case_sensitive
+                )
+                result['matched_text'] = self.get_plain_matches(
+                    comment_data['text'], 
+                    search_keywords, 
+                    search_mode, 
+                    case_sensitive
+                )
+            
+            results.append(result)
+        
+        # Sort by likes if no keywords, otherwise by relevance
+        if search_keywords:
+            results.sort(key=lambda x: x['relevance_score'], reverse=True)
+        else:
+            results.sort(key=lambda x: x['comment'].get('like_count', 0), reverse=True)
+        
+        return results
+    
+    def search_comments(
+        self,
+        keywords,
+        search_mode="any",
+        case_sensitive=False,
+        min_likes=0,
+        max_results=None,
+        sort_by="relevance",
+    ):
         print(f"\n{'='*60}")
         print(f"Searching in: {self.comments_dir}")
         print(f"Keywords: {keywords}")
         print(f"Mode: {search_mode}, Case-sensitive: {case_sensitive}")
         print(f"Min likes: {min_likes}")
         print(f"{'='*60}\n")
-        
+
         if not self.comments_dir.exists():
             print(f"✗ Error: Directory not found: {self.comments_dir}")
             return []
-        
-        json_files = list(self.comments_dir.glob("*.json"))
-        
+
+        json_files = list(self.comments_dir.glob("*.info.json"))
+
         if not json_files:
-            print(f"✗ No JSON files found in {self.comments_dir}")
+            print(f"✗ No *.info.json files found in {self.comments_dir}")
             return []
-        
-        print(f"Scanning {len(json_files)} comment file(s)...\n")
-        
+
+        print(f"Scanning {len(json_files)} info JSON file(s)...\n")
+
         results = []
         total_comments = 0
-        
+
         for json_file in json_files:
             comments, filename = self.load_comments_from_file(json_file)
+            video_id = self.extract_video_id_from_filename(filename)
+
             total_comments += len(comments)
-            
+
             for comment in comments:
-                text = comment.get('text', '')
+                text = comment.get("text", "")
                 if not text:
                     continue
-                
-                # Apply like filter
-                if comment.get('like_count', 0) < min_likes:
+
+                if comment.get("like_count", 0) < min_likes:
                     continue
-                
-                # Apply search based on mode
+
                 match = False
-                if search_mode == 'any':
+                if search_mode == "any":
                     match = self.search_simple(text, keywords, case_sensitive)
-                elif search_mode == 'all':
+                elif search_mode == "all":
                     match = self.search_all_keywords(text, keywords, case_sensitive)
-                elif search_mode == 'phrase':
-                    match = self.search_phrase(text, ' '.join(keywords), case_sensitive)
-                elif search_mode == 'regex':
+                elif search_mode == "phrase":
+                    match = self.search_phrase(text, " ".join(keywords), case_sensitive)
+                elif search_mode == "regex":
                     match = self.search_regex(text, keywords[0])
-                
+
                 if match:
-                    result = {
-                        'comment': comment,
-                        'source_file': filename,
-                        'video_id': filename.split('_')[0] if '_' in filename else 'unknown',
-                        'relevance_score': self.calculate_relevance_score(comment, keywords, case_sensitive),
-                        'matched_text': self.get_plain_matches(text, keywords, search_mode, case_sensitive)
-                    }
-                    results.append(result)
-        
+                    results.append({
+                        "comment": comment,
+                        "source_file": filename,
+                        "video_id": video_id,
+                        "relevance_score": self.calculate_relevance_score(
+                            comment, keywords, case_sensitive
+                        ),
+                        "matched_text": self.get_plain_matches(
+                            text, keywords, search_mode, case_sensitive
+                        ),
+                    })
+
         print(f"✓ Scanned {total_comments} total comments")
         print(f"✓ Found {len(results)} matching comments\n")
-        
-        # Sort results
-        if sort_by == 'relevance':
-            results.sort(key=lambda x: x['relevance_score'], reverse=True)
-        elif sort_by == 'likes':
-            results.sort(key=lambda x: x['comment'].get('like_count', 0), reverse=True)
-        elif sort_by == 'date':
-            results.sort(key=lambda x: x['comment'].get('timestamp', 0), reverse=True)
-        
-        # Limit results if specified
+
+        if sort_by == "relevance":
+            results.sort(key=lambda x: x["relevance_score"], reverse=True)
+        elif sort_by == "likes":
+            results.sort(key=lambda x: x["comment"].get("like_count", 0), reverse=True)
+        elif sort_by == "date":
+            results.sort(key=lambda x: x["comment"].get("timestamp", 0), reverse=True)
+
         if max_results:
             results = results[:max_results]
-        
+
         return results
+
+
     
     def display_results(self, results, highlight=True, keywords=None, search_mode='any', 
                        case_sensitive=False):
@@ -279,7 +506,9 @@ class CommentSearcher:
                   f"Verified: {'Yes' if comment.get('author_is_verified') else 'No'} | "
                   f"Uploader: {'Yes' if comment.get('author_is_uploader') else 'No'}")
             print(f"    Posted: {comment.get('_time_text', 'Unknown')}")
-            print(f"    Relevance Score: {result['relevance_score']}")
+            
+            if result['relevance_score'] > 0:
+                print(f"    Relevance Score: {result['relevance_score']}")
             
             # Display comment text (never truncated)
             text = comment.get('text', '')
@@ -290,7 +519,7 @@ class CommentSearcher:
             print(f"    URL: https://www.youtube.com/watch?v={result['video_id']}")
             print()
     
-    def export_json(self, results, output_file, command_line):
+    def export_json(self, results, output_file, command_line, username=None):
         """Export results to JSON file"""
         try:
             # Create output directory if it doesn't exist
@@ -303,6 +532,9 @@ class CommentSearcher:
                 'total_results': len(results),
                 'results': []
             }
+            
+            if username:
+                export_data['user_filter'] = username
             
             for result in results:
                 export_data['results'].append({
@@ -320,7 +552,7 @@ class CommentSearcher:
         except Exception as e:
             print(f"✗ Error exporting JSON results: {e}")
     
-    def export_docx(self, results, output_file, highlight=True, command_line=''):
+    def export_docx(self, results, output_file, highlight=True, command_line='', username=None):
         """Export results to DOCX file with optional highlighting"""
         try:
             from docx import Document
@@ -331,7 +563,11 @@ class CommentSearcher:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
             doc = Document()
-            doc.add_heading('YouTube Comment Search Results', 0)
+            
+            if username:
+                doc.add_heading(f'Comments by {username}', 0)
+            else:
+                doc.add_heading('YouTube Comment Search Results', 0)
             
             # Add command line at the top
             if command_line:
@@ -362,8 +598,11 @@ class CommentSearcher:
                 p.add_run(f"Uploader: {('Yes' if comment.get('author_is_uploader') else 'No')}\n")
                 p.add_run(f"Posted: ").bold = True
                 p.add_run(f"{comment.get('_time_text', 'Unknown')}\n")
-                p.add_run(f"Relevance Score: ").bold = True
-                p.add_run(f"{result['relevance_score']}\n")
+                
+                if result['relevance_score'] > 0:
+                    p.add_run(f"Relevance Score: ").bold = True
+                    p.add_run(f"{result['relevance_score']}\n")
+                
                 p.add_run(f"URL: ").bold = True
                 p.add_run(f"https://www.youtube.com/watch?v={result['video_id']}\n")
                 
@@ -443,13 +682,20 @@ def main():
         print("\n" + "="*60)
         print(APP_NAME.center(60))
         print("="*60)
-        print("\nError: No keywords provided\n")
-        print("Usage: python comment_search.py KEYWORDS [OPTIONS]\n")
+        print("\nError: No arguments provided\n")
+        print("Usage: python comment_search.py -d DIRECTORY [OPTIONS]\n")
         print("Examples:")
-        print('  python comment_search.py "deep web" "murder" "photo"')
-        print('  python comment_search.py "murder" -m all --min-likes 10')
-        print('  python comment_search.py "deep web" --no-highlight')
-        print('  python comment_search.py "murder" --export docx')
+        print('  # Search for keywords')
+        print('  python comment_search.py -d ./comments "deep web" "murder"')
+        print()
+        print('  # Find most active users')
+        print('  python comment_search.py -d ./comments --most-active 20')
+        print()
+        print('  # Extract all comments from a user')
+        print('  python comment_search.py -d ./comments --user "John Doe"')
+        print()
+        print('  # Search within a specific user\'s comments')
+        print('  python comment_search.py -d ./comments --user "John Doe" "keyword"')
         print("\nFor more help, use: python comment_search.py -h\n")
         sys.exit(1)
     
@@ -459,53 +705,73 @@ def main():
         epilog="""
 Examples:
   # Search for any keyword (saves JSON by default)
-  %(prog)s "deep web" "murder" "photo"
+  %(prog)s -d ./comments "deep web" "murder" "photo"
   
   # Search requiring ALL keywords
-  %(prog)s "deep web" "murder" -m all
+  %(prog)s -d ./comments "deep web" "murder" -m all
+  
+  # Find the 20 most active users
+  %(prog)s -d ./comments --most-active 20
+  
+  # Extract all comments from a specific user
+  %(prog)s -d ./comments --user "John Doe"
+  
+  # Search within a specific user's comments
+  %(prog)s -d ./comments --user "John Doe" "murder" "deep web"
+  
+  # Search user's comments with filters
+  %(prog)s -d ./comments --user "John Doe" "keyword" --min-likes 5 -m all
+  
+  # Export user's comments to DOCX
+  %(prog)s -d ./comments --user "John Doe" --export docx
   
   # Search for exact phrase
-  %(prog)s "deep web murder" -m phrase
+  %(prog)s -d ./comments "deep web murder" -m phrase
   
   # Disable highlighting in terminal
-  %(prog)s "murder" --no-highlight
+  %(prog)s -d ./comments "murder" --no-highlight
   
   # Export to DOCX with highlighting
-  %(prog)s "murder" --export docx
-  
-  # Export to both JSON and DOCX
-  %(prog)s "murder" --export json docx
-  
-  # Export to DOCX without highlighting
-  %(prog)s "murder" --export docx --no-docx-highlight
+  %(prog)s -d ./comments "murder" --export docx
   
   # Only show comments with 10+ likes
-  %(prog)s "murder" --min-likes 10
+  %(prog)s -d ./comments "murder" --min-likes 10
   
   # Disable auto-save
-  %(prog)s "murder" --no-save
+  %(prog)s -d ./comments "murder" --no-save
   
   # Show author statistics
-  %(prog)s "murder" --stats
+  %(prog)s -d ./comments "murder" --stats
   
   # Search with regex pattern
-  %(prog)s "murder(ed|ing|s)?" -m regex
-  
-  # Custom comments directory
-  %(prog)s "murder" -d ./my_comments
+  %(prog)s -d ./comments "murder(ed|ing|s)?" -m regex
         """
     )
     
     parser.add_argument(
         'keywords',
-        nargs='+',
-        help='Keywords or phrases to search for'
+        nargs='*',
+        help='Keywords or phrases to search for (optional when using --most-active or --user without search)'
     )
     
     parser.add_argument(
         '-d', '--dir',
-        default='comment_sections',
-        help='Directory containing comment JSON files (default: comment_sections)'
+        required=True,
+        help='Directory containing comment JSON files (REQUIRED)'
+    )
+    
+    parser.add_argument(
+        '--most-active',
+        type=int,
+        metavar='N',
+        help='Show the N most active users (by comment count)'
+    )
+    
+    parser.add_argument(
+        '--user',
+        type=str,
+        metavar='USERNAME',
+        help='Extract all comments from a specific user (exact username match)'
     )
     
     parser.add_argument(
@@ -575,9 +841,85 @@ Examples:
     )
     
     args = parser.parse_args()
+    print(f"RAW DIR ARG: {repr(args.dir)}")
+
     
     # Create searcher instance
     searcher = CommentSearcher(args.dir)
+    
+    # Handle --most-active flag
+    if args.most_active:
+        searcher.show_most_active_users(args.most_active)
+        return
+    
+    # Handle --user flag
+    if args.user:
+        # Extract user comments, optionally with search keywords
+        results = searcher.extract_user_comments(
+            username=args.user,
+            search_keywords=args.keywords if args.keywords else None,
+            search_mode=args.mode,
+            case_sensitive=args.case_sensitive,
+            min_likes=args.min_likes
+        )
+        
+        # Apply max results limit if specified
+        if args.max_results and len(results) > args.max_results:
+            results = results[:args.max_results]
+        
+        # Display results
+        if results:
+            searcher.display_results(
+                results,
+                highlight=not args.no_highlight,
+                keywords=args.keywords if args.keywords else None,
+                search_mode=args.mode,
+                case_sensitive=args.case_sensitive
+            )
+        
+        # Auto-save results unless disabled
+        if not args.no_save and results:
+            # Create output directory
+            output_dir = Path('search_results')
+            output_dir.mkdir(exist_ok=True)
+            
+            # Generate base filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_username = "".join(c for c in args.user if c.isalnum() or c in (' ', '-', '_')).strip()
+            safe_username = safe_username.replace(' ', '_')
+            base_filename = output_dir / f"user_{safe_username}_{timestamp}"
+            
+            # Reconstruct command line
+            command_line = ' '.join(sys.argv)
+            
+            # Save in requested formats
+            for export_format in args.export:
+                if export_format == 'json':
+                    json_file = f"{base_filename}.json"
+                    searcher.export_json(results, json_file, command_line, username=args.user)
+                elif export_format == 'docx':
+                    docx_file = f"{base_filename}.docx"
+                    searcher.export_docx(
+                        results,
+                        docx_file,
+                        highlight=not args.no_docx_highlight,
+                        command_line=command_line,
+                        username=args.user
+                    )
+            
+            print()
+        
+        # Show author stats if requested (though for single user it's redundant)
+        if args.stats and results:
+            searcher.generate_author_stats(results)
+        
+        return
+    
+    # Regular keyword search (original functionality)
+    if not args.keywords:
+        print("\n✗ Error: Keywords are required for regular search")
+        print("Use --most-active to find active users, or --user to extract user comments\n")
+        sys.exit(1)
     
     # Perform search
     results = searcher.search_comments(
