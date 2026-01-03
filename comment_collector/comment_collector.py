@@ -12,6 +12,8 @@ import time
 import json
 from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+import platform
 
 APP_NAME = "YouTube Comment Collector"
 
@@ -33,8 +35,8 @@ def print_intro_banner():
 # ───────────────────────────────
 
 def get_default_ytdlp_path():
-    script_dir = Path(__file__).parent
-    bin_dir = script_dir / "bin"
+    script_dir = Path(__file__).parent.resolve()
+    bin_dir = script_dir.parent / "bin"  # Goes up one level to the project root, then into bin
     exe_name = "yt-dlp.exe" if platform.system() == "Windows" else "yt-dlp"
     return bin_dir / exe_name
 

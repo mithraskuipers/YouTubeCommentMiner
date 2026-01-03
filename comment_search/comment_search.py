@@ -11,7 +11,21 @@ from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
 
+# By default, ANSI colors are enabled
+USE_COLOR = True
+
+
+
+
+
 APP_NAME = "YouTube Comment Search"
+
+# Force UTF-8 output on Windows
+if sys.platform.startswith("win"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except AttributeError:
+        pass  # Python < 3.7 fallback
 
 # ANSI color codes for terminal highlighting
 RED = '\033[91m'
@@ -297,6 +311,96 @@ class CommentSearcher:
         
         return top_users
     
+    def export_active_users_json(self, top_users, output_file, command_line):
+        """Export most active users to JSON file"""
+        try:
+            output_path = Path(output_file)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            export_data = {
+                'command': command_line,
+                'generated': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'total_users': len(top_users),
+                'users': []
+            }
+            
+            for rank, (author, stats) in enumerate(top_users, 1):
+                export_data['users'].append({
+                    'rank': rank,
+                    'author': author,
+                    'author_id': stats['author_id'],
+                    'comment_count': stats['count'],
+                    'total_likes': stats['total_likes'],
+                    'avg_likes': stats['total_likes'] / stats['count'] if stats['count'] > 0 else 0,
+                    'is_verified': stats['is_verified'],
+                    'is_uploader': stats['is_uploader'],
+                })
+            
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(export_data, f, indent=2, ensure_ascii=False)
+            
+            print(f"✓ Most active users exported to JSON: {output_file}")
+        except Exception as e:
+            print(f"✗ Error exporting JSON: {e}")
+    
+    def export_active_users_docx(self, top_users, output_file, command_line):
+        """Export most active users to DOCX file"""
+        try:
+            from docx import Document
+            from docx.shared import RGBColor
+            
+            output_path = Path(output_file)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            doc = Document()
+            doc.add_heading('Most Active Users Analysis', 0)
+            
+            if command_line:
+                p = doc.add_paragraph()
+                p.add_run('Command: ').bold = True
+                p.add_run(command_line)
+                doc.add_paragraph()
+            
+            doc.add_paragraph(f'Total Users Analyzed: {len(top_users)}')
+            doc.add_paragraph(f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
+            doc.add_paragraph()
+            
+            for rank, (author, stats) in enumerate(top_users, 1):
+                doc.add_heading(f'Rank {rank}: {author}', level=1)
+                
+                p = doc.add_paragraph()
+                p.add_run(f"Author ID: ").bold = True
+                p.add_run(f"{stats['author_id']}\n")
+                
+                p.add_run(f"Comments: ").bold = True
+                p.add_run(f"{stats['count']}\n")
+                
+                p.add_run(f"Total Likes: ").bold = True
+                p.add_run(f"{stats['total_likes']}\n")
+                
+                p.add_run(f"Avg Likes per Comment: ").bold = True
+                p.add_run(f"{stats['total_likes'] / stats['count']:.1f}\n")
+                
+                badges = []
+                if stats['is_verified']:
+                    badges.append("Verified")
+                if stats['is_uploader']:
+                    badges.append("Uploader")
+                
+                if badges:
+                    p.add_run(f"Badges: ").bold = True
+                    p.add_run(f"{', '.join(badges)}\n")
+                
+                doc.add_paragraph()
+            
+            doc.save(output_file)
+            print(f"✓ Most active users exported to DOCX: {output_file}")
+            
+        except ImportError:
+            print(f"✗ Error: python-docx library not installed. Install with: pip install python-docx")
+        except Exception as e:
+            print(f"✗ Error exporting DOCX: {e}")
+    
     def extract_user_comments(self, username, search_keywords=None, search_mode='any', 
                              case_sensitive=False, min_likes=0):
         """Extract all comments from a specific user, optionally filtering by keywords"""
@@ -513,7 +617,8 @@ class CommentSearcher:
             # Display comment text (never truncated)
             text = comment.get('text', '')
             if highlight and keywords:
-                text = self.highlight_matches(text, keywords, search_mode, case_sensitive, use_color=True)
+                text = self.highlight_matches(text, keywords, search_mode, case_sensitive, use_color=USE_COLOR)
+
             print(f"    Comment: {text}")
             
             print(f"    URL: https://www.youtube.com/watch?v={result['video_id']}")
@@ -677,6 +782,8 @@ class CommentSearcher:
         print()
 
 def main():
+    from comment_search_help import get_usage_examples, get_arg_parser
+    
     # Check if no arguments provided
     if len(sys.argv) == 1:
         print("\n" + "="*60)
@@ -684,172 +791,122 @@ def main():
         print("="*60)
         print("\nError: No arguments provided\n")
         print("Usage: python comment_search.py -d DIRECTORY [OPTIONS]\n")
-        print("Examples:")
-        print('  # Search for keywords')
-        print('  python comment_search.py -d ./comments "deep web" "murder"')
-        print()
-        print('  # Find most active users')
-        print('  python comment_search.py -d ./comments --most-active 20')
-        print()
-        print('  # Extract all comments from a user')
-        print('  python comment_search.py -d ./comments --user "John Doe"')
-        print()
-        print('  # Search within a specific user\'s comments')
-        print('  python comment_search.py -d ./comments --user "John Doe" "keyword"')
+        print(get_usage_examples())
         print("\nFor more help, use: python comment_search.py -h\n")
         sys.exit(1)
     
-    parser = argparse.ArgumentParser(
-        description='Search through YouTube comment JSON files',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Search for any keyword (saves JSON by default)
-  %(prog)s -d ./comments "deep web" "murder" "photo"
-  
-  # Search requiring ALL keywords
-  %(prog)s -d ./comments "deep web" "murder" -m all
-  
-  # Find the 20 most active users
-  %(prog)s -d ./comments --most-active 20
-  
-  # Extract all comments from a specific user
-  %(prog)s -d ./comments --user "John Doe"
-  
-  # Search within a specific user's comments
-  %(prog)s -d ./comments --user "John Doe" "murder" "deep web"
-  
-  # Search user's comments with filters
-  %(prog)s -d ./comments --user "John Doe" "keyword" --min-likes 5 -m all
-  
-  # Export user's comments to DOCX
-  %(prog)s -d ./comments --user "John Doe" --export docx
-  
-  # Search for exact phrase
-  %(prog)s -d ./comments "deep web murder" -m phrase
-  
-  # Disable highlighting in terminal
-  %(prog)s -d ./comments "murder" --no-highlight
-  
-  # Export to DOCX with highlighting
-  %(prog)s -d ./comments "murder" --export docx
-  
-  # Only show comments with 10+ likes
-  %(prog)s -d ./comments "murder" --min-likes 10
-  
-  # Disable auto-save
-  %(prog)s -d ./comments "murder" --no-save
-  
-  # Show author statistics
-  %(prog)s -d ./comments "murder" --stats
-  
-  # Search with regex pattern
-  %(prog)s -d ./comments "murder(ed|ing|s)?" -m regex
-        """
-    )
-    
-    parser.add_argument(
-        'keywords',
-        nargs='*',
-        help='Keywords or phrases to search for (optional when using --most-active or --user without search)'
-    )
-    
-    parser.add_argument(
-        '-d', '--dir',
-        required=True,
-        help='Directory containing comment JSON files (REQUIRED)'
-    )
-    
-    parser.add_argument(
-        '--most-active',
-        type=int,
-        metavar='N',
-        help='Show the N most active users (by comment count)'
-    )
-    
-    parser.add_argument(
-        '--user',
-        type=str,
-        metavar='USERNAME',
-        help='Extract all comments from a specific user (exact username match)'
-    )
-    
-    parser.add_argument(
-        '-m', '--mode',
-        choices=['any', 'all', 'phrase', 'regex'],
-        default='any',
-        help='Search mode: any=match any keyword, all=match all keywords, phrase=exact phrase, regex=regular expression (default: any)'
-    )
-    
-    parser.add_argument(
-        '--case-sensitive',
-        action='store_true',
-        help='Enable case-sensitive search'
-    )
-    
-    parser.add_argument(
-        '--min-likes',
-        type=int,
-        default=0,
-        help='Minimum number of likes (default: 0)'
-    )
-    
-    parser.add_argument(
-        '-n', '--max-results',
-        type=int,
-        default=None,
-        help='Maximum number of results to display (default: all)'
-    )
-    
-    parser.add_argument(
-        '-s', '--sort',
-        choices=['relevance', 'likes', 'date'],
-        default='relevance',
-        help='Sort results by: relevance, likes, or date (default: relevance)'
-    )
-    
-    parser.add_argument(
-        '--no-highlight',
-        action='store_true',
-        help='Disable keyword highlighting in terminal output'
-    )
-    
-    parser.add_argument(
-        '--no-save',
-        action='store_true',
-        help='Disable automatic saving of results'
-    )
-    
-    parser.add_argument(
-        '--export',
-        nargs='+',
-        choices=['json', 'docx'],
-        default=['json'],
-        help='Export formats: json, docx (default: json). Can specify multiple formats.'
-    )
-    
-    parser.add_argument(
-        '--no-docx-highlight',
-        action='store_true',
-        help='Disable keyword highlighting in DOCX export'
-    )
-    
-    parser.add_argument(
-        '--stats',
-        action='store_true',
-        help='Show author statistics'
-    )
-    
-    args = parser.parse_args()
-    print(f"RAW DIR ARG: {repr(args.dir)}")
 
-    
+    parser = get_arg_parser()
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable ANSI colors (for GUI output)"
+    )
+    args = parser.parse_args()
+
+
+
+    USE_COLOR = not args.no_color
+
     # Create searcher instance
     searcher = CommentSearcher(args.dir)
     
     # Handle --most-active flag
     if args.most_active:
-        searcher.show_most_active_users(args.most_active)
+        top_users = searcher.show_most_active_users(args.most_active)
+        
+        if not top_users:
+            return
+        
+        # If keywords provided, search within most active user(s) comments
+        if args.keywords:
+            all_results = []
+            
+            for author, stats in top_users:
+                print(f"\nSearching in comments by: {author}")
+                print(f"{'='*60}\n")
+                
+                # Extract comments from this user with keyword filter
+                user_results = searcher.extract_user_comments(
+                    username=author,
+                    search_keywords=args.keywords,
+                    search_mode=args.mode,
+                    case_sensitive=args.case_sensitive,
+                    min_likes=args.min_likes
+                )
+                
+                all_results.extend(user_results)
+            
+            # Apply max results limit if specified
+            if args.max_results and len(all_results) > args.max_results:
+                all_results = all_results[:args.max_results]
+            
+            # Display results
+            if all_results:
+                searcher.display_results(
+                    all_results,
+                    highlight=not args.no_highlight,
+                    keywords=args.keywords,
+                    search_mode=args.mode,
+                    case_sensitive=args.case_sensitive
+                )
+            
+            # Auto-save results unless disabled
+            if not args.no_save and all_results:
+                output_dir = Path('search_results')
+                output_dir.mkdir(exist_ok=True)
+                
+                dir_name = Path(args.dir).name
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                
+                # Create descriptive filename
+                if args.most_active == 1:
+                    safe_username = "".join(c for c in top_users[0][0] if c.isalnum() or c in (' ', '-', '_')).strip()
+                    safe_username = safe_username.replace(' ', '_')
+                    base_filename = output_dir / f"{dir_name}_most_active_{safe_username}_{timestamp}"
+                else:
+                    base_filename = output_dir / f"{dir_name}_most_active_top{args.most_active}_{timestamp}"
+                
+                command_line = ' '.join(sys.argv)
+                
+                # Save in requested formats
+                for export_format in args.export:
+                    if export_format == 'json':
+                        json_file = f"{base_filename}.json"
+                        searcher.export_json(all_results, json_file, command_line)
+                    elif export_format == 'docx':
+                        docx_file = f"{base_filename}.docx"
+                        searcher.export_docx(
+                            all_results,
+                            docx_file,
+                            highlight=not args.no_docx_highlight,
+                            command_line=command_line
+                        )
+                
+                print()
+        else:
+            # No keywords - export user statistics
+            if not args.no_save:
+                output_dir = Path('search_results')
+                output_dir.mkdir(exist_ok=True)
+                
+                dir_name = Path(args.dir).name
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                base_filename = output_dir / f"{dir_name}_most_active_top{args.most_active}_{timestamp}"
+                
+                command_line = ' '.join(sys.argv)
+                
+                # Save in requested formats
+                for export_format in args.export:
+                    if export_format == 'json':
+                        json_file = f"{base_filename}.json"
+                        searcher.export_active_users_json(top_users, json_file, command_line)
+                    elif export_format == 'docx':
+                        docx_file = f"{base_filename}.docx"
+                        searcher.export_active_users_docx(top_users, docx_file, command_line)
+                
+                print()
+        
         return
     
     # Handle --user flag
